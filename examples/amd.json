@@ -1,0 +1,15 @@
+{
+  "host": "node-b",
+  "database": "/path/to/local-state/queue.sqlite3",
+  "artifact_root": "/path/to/local-runs/{user}",
+  "archive_root": null,
+  "poll_seconds": 5,
+  "telemetry_seconds": 5,
+  "resources": {
+    "gpu": {
+      "guard_mode": "fuser",
+      "guard": ["sudo", "-n", "fuser", "/dev/kfd", "/dev/dri/renderD128"],
+      "environment": {"HIP_VISIBLE_DEVICES": "0"}
+    }
+  }
+}

@@ -1,0 +1,33 @@
+This project uses the Developer Certificate of Origin (DCO), version 1.1:
+
+https://developercertificate.org/
+
+By submitting a contribution, certify that you have the right to submit
+it under this project's MIT license. Add a Signed-off-by trailer to each
+commit, using your real name and contact address:
+
+    Signed-off-by: Your Name <you@example.org>
+
+git commit -s adds the trailer. Read the complete DCO before signing.
+
+Use SPDX-License-Identifier: MIT in source files. Keep dependencies small,
+document operational behavior and test meaningful invariants: FIFO claims,
+owner checks, process cleanup and archival verification.
+
+Run:
+
+    PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+Changes to systemd integration also need a real user-service check. Use
+an isolated database and a CPU-only test resource; never run a test on
+someone else's GPU reservation or stop their processes.
+
+Keep host configuration, credentials, databases, logs, checkpoints and
+private experiment evidence outside the source tree.
+Use generic deployment placeholders in public documentation. Never publish
+personal machine names, filesystem layouts, network addresses or runtime
+records without the owner's explicit approval. Review the full staged diff
+and commit history for these details before publishing.
+
+Describe substantial AI assistance in the pull request description.
+Contributors remain responsible for understanding and testing their changes.

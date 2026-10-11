@@ -1,0 +1,8 @@
+This project is provided under:
+
+    SPDX-License-Identifier: MIT
+    LICENSES/preferred/MIT
+
+Source files carry SPDX identifiers. The identifier selects the license
+text in LICENSES/preferred/MIT. Contributions use the Developer Certificate
+of Origin described in CONTRIBUTING.

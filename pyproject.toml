@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpuq"
+version = "0.1.0"
+description = "A small cooperative GPU queue with experiment history and cold archives"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "COPYING", "LICENSES/preferred/MIT"]
+authors = [{ name = "Luis Chamberlain", email = "mcgrof@kernel.org" }]
+dependencies = []
+
+[project.scripts]
+gpuq = "gpuq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

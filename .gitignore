@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.coverage
+.pytest_cache/
+*.sqlite3*
+*.db*
+*.jsonl
+*.log
+state/
+runs/
+local/
+config*.json
+host*.json

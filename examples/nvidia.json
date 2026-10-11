@@ -1,0 +1,15 @@
+{
+  "host": "node-a",
+  "database": "/path/to/local-state/queue.sqlite3",
+  "artifact_root": "/path/to/local-runs/{user}",
+  "archive_root": null,
+  "poll_seconds": 5,
+  "telemetry_seconds": 5,
+  "resources": {
+    "gpu": {
+      "guard_mode": "nvidia",
+      "guard": ["nvidia-smi", "--id=0", "--query-compute-apps=pid", "--format=csv,noheader"],
+      "environment": {"CUDA_VISIBLE_DEVICES": "0"}
+    }
+  }
+}
