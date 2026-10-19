@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from . import archive, motd, runner
+from . import archive, motd, runner, snapshot
 from .config import account, identifier, load, run_path
 from .store import Store, TERMINAL, new_id
 from .util import local_database
@@ -56,6 +56,8 @@ def parser():
     cold.add_argument("--include-checkpoints", action="store_true")
     cold.add_argument("--prune-local", action="store_true")
     cold.add_argument("--dry-run", action="store_true")
+    view = commands.add_parser("snapshot", help="print a versioned queue and telemetry view for frontends")
+    view.add_argument("--format", choices=("json", "waybar"), default="json")
     banner = commands.add_parser("motd", help="render the queue as a login banner")
     banner.add_argument("--write", metavar="FILE")
     for name in ("_worker", "_finalize"):
@@ -191,6 +193,12 @@ def execute(args):
                 dry_run=args.dry_run,
             ))
         print(json.dumps(results, indent=2))
+    elif args.action == "snapshot":
+        view = snapshot.build(config, store.jobs())
+        if args.format == "waybar":
+            print(json.dumps(snapshot.waybar(view)))
+        else:
+            print(json.dumps(view, indent=2))
     elif args.action == "motd":
         if args.write:
             # Serialize snapshot generation too, so concurrent writers cannot

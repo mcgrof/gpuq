@@ -34,7 +34,7 @@ class Store:
 
     def initialize(self, gid=None):
         if self.path.parent.exists():
-            allowed = {self.path.name, self.path.name + "-wal", self.path.name + "-shm", "motd.lock"}
+            allowed = {self.path.name, self.path.name + "-wal", self.path.name + "-shm", "motd.lock", "live"}
             if any(entry.name not in allowed for entry in self.path.parent.iterdir()):
                 raise ValueError("initialize requires a dedicated database directory")
         self.path.parent.mkdir(parents=True, exist_ok=True)

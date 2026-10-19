@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+from .snapshot import publish_live
 from .store import now
 from .util import atomic_json
 
@@ -89,6 +90,10 @@ class Telemetry:
                     }
                     file.write(json.dumps(sample, sort_keys=True) + "\n")
                     file.flush()
+                    try:
+                        publish_live(self.config, self.job["resource"], sample)
+                    except Exception:
+                        pass  # Best effort: the run's own JSONL is the durable record.
                     self.count += 1
                     for key in ("utilization", "memory_used", "power"):
                         value = stats.get(key)

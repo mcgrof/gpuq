@@ -174,3 +174,37 @@ a sleeping process tree, and the archive destination independently.
 The unit suite tests concurrent FIFO claims, owner checks, slot retention,
 archive failures, checkpoint retention and streaming telemetry.
 Actual GPU training/inference performance is not a queue benchmark.
+
+## Desktop panels and status bars
+
+`gpuq snapshot` prints a read-only, versioned JSON view intended for
+frontends (GNOME Shell extensions, waybar, scripts). It never mutates the
+queue, so a panel can poll it every few seconds, locally or over ssh:
+
+~~~sh
+gpuq snapshot                      # schema-versioned JSON
+gpuq snapshot --format waybar      # {"text","tooltip","class","alt"}
+ssh node-a 'GPUQ_CONFIG=/path/to/config.json gpuq snapshot'
+~~~
+
+Schema 1 contains `host`, `generated_at` and one entry per resource with
+`active` (the running or needs-review run), the FIFO `queue` with
+`position`, estimated `expected_end` and `remaining_seconds`, and
+`telemetry`: the latest device-wide gputop sample, with `age_seconds`
+and a `stale` flag. Fields may be added within a schema version;
+renaming or removing one increments `schema`.
+
+While a run collects telemetry, each sample is also written to
+`live/RESOURCE.json` beside the database, readable by the queue group.
+Run directories stay private to their owners. The live file is
+best-effort and is left behind when a run ends, hence the stale flag.
+
+A waybar module:
+
+~~~json
+"custom/gpuq": {
+  "exec": "gpuq snapshot --format waybar",
+  "return-type": "json",
+  "interval": 10
+}
+~~~
