@@ -16,7 +16,7 @@ export default class GpuqPreferences extends ExtensionPreferences {
             description: 'One shell command per host; each must print `gpuq snapshot` JSON. ' +
                 'GNOME Shell does not read your shell profile, so use absolute paths and set ' +
                 'GPUQ_CONFIG, e.g. "GPUQ_CONFIG=/etc/gpuq.json /opt/gpuq/bin/gpuq snapshot" or ' +
-                '"ssh -o BatchMode=yes gpu1 gpuq snapshot". Leave a row empty to remove it.',
+                '"ssh -o BatchMode=yes node-a gpuq snapshot". Leave a row empty to remove it.',
         });
         page.add(sources);
         let rows = [];

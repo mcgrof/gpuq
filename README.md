@@ -30,6 +30,16 @@ boundary, not a security boundary. The CLI checks ownership of operations;
 Linux accounts and systemd keep ordinary job execution under the submitting
 user. Use a scheduler such as Slurm when you need centrally enforced policy.
 
+## Desktop panel
+
+`gpuq snapshot` prints a versioned JSON view of every queue, so panels and
+status bars can poll one or more hosts, locally or over ssh. A
+[GNOME Shell extension](contrib/gnome-shell-extension/) shows active runs,
+live GPU utilization and queued work across hosts; `--format waybar` feeds
+a waybar custom module.
+
+![gpuq GNOME Shell extension](docs/images/gnome-extension.jpg)
+
 ## Quick start
 
 An administrator chooses an installation directory and a private configuration

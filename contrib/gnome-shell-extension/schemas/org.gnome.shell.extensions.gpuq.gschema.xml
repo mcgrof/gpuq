@@ -5,7 +5,7 @@
     <key name="sources" type="as">
       <default>['gpuq snapshot']</default>
       <summary>Snapshot commands</summary>
-      <description>Shell commands that print gpuq snapshot JSON, one per host, e.g. "ssh gpu1 gpuq snapshot".</description>
+      <description>Shell commands that print gpuq snapshot JSON, one per host, e.g. "ssh node-a gpuq snapshot".</description>
     </key>
     <key name="refresh-interval" type="i">
       <range min="2" max="3600"/>
