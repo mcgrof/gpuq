@@ -1,0 +1,9 @@
+{
+  "name": "gpuq",
+  "description": "Show gpuq GPU reservations, queued experiments and live GPU telemetry in the top bar. Polls one or more configurable `gpuq snapshot` commands, locally or over ssh.",
+  "uuid": "gpuq@mcgrof.github.io",
+  "settings-schema": "org.gnome.shell.extensions.gpuq",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/mcgrof/gpuq",
+  "version": 1
+}

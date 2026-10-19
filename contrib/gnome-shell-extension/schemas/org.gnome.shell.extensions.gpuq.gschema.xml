@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<schemalist>
+  <schema id="org.gnome.shell.extensions.gpuq" path="/org/gnome/shell/extensions/gpuq/">
+    <key name="sources" type="as">
+      <default>['gpuq snapshot']</default>
+      <summary>Snapshot commands</summary>
+      <description>Shell commands that print gpuq snapshot JSON, one per host, e.g. "ssh gpu1 gpuq snapshot".</description>
+    </key>
+    <key name="refresh-interval" type="i">
+      <range min="2" max="3600"/>
+      <default>10</default>
+      <summary>Refresh interval in seconds</summary>
+    </key>
+    <key name="position-in-panel" type="s">
+      <choices><choice value="left"/><choice value="center"/><choice value="right"/></choices>
+      <default>'right'</default>
+      <summary>Position in panel</summary>
+    </key>
+  </schema>
+</schemalist>

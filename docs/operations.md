@@ -199,6 +199,7 @@ While a run collects telemetry, each sample is also written to
 Run directories stay private to their owners. The live file is
 best-effort and is left behind when a run ends, hence the stale flag.
 
+A GNOME Shell extension lives in `contrib/gnome-shell-extension`.
 A waybar module:
 
 ~~~json

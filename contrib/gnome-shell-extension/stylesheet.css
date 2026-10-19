@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: MIT */
+.gpuq-label { font-feature-settings: "tnum"; }
+.gpuq-idle { color: #9a9996; }
+.gpuq-error { color: #ed333b; }
+.gpuq-host { font-weight: bold; }
+.gpuq-detail { color: #c0bfbc; font-size: 0.9em; }
