@@ -78,6 +78,61 @@ def print_jobs(jobs, as_json):
         print("(no runs)")
 
 
+def submit_job(config, *, experiment, resource, description, expected_minutes,
+               command, cwd, parent_run=None, run_id=None, prepare=None):
+    store = Store(config["database"])
+    user = account()
+    if user["uid"] == 0:
+        raise PermissionError("submit as the research user, not through sudo")
+    if resource not in config["resources"]:
+        raise ValueError("unknown resource")
+    command = list(command)
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        raise ValueError("supply a command after --")
+    cwd = Path(cwd).expanduser().resolve()
+    if not cwd.is_dir():
+        raise ValueError("working directory does not exist")
+    if "/" in command[0]:
+        executable = Path(command[0]).expanduser()
+        # Preserve interpreter symlinks: resolving a venv's bin/python to
+        # /usr/bin/python loses that virtual environment at execution time.
+        command[0] = os.path.abspath(cwd / executable)
+    else:
+        executable = shutil.which(command[0])
+        if executable is None:
+            raise ValueError("command is not in your PATH")
+        command[0] = executable
+    run_id = run_id or new_id()
+    directory = run_path(config, user, experiment, run_id)
+    directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+    job = store.submit(
+        user=user, resource=resource, description=description or experiment,
+        experiment_id=experiment, command=command, cwd=cwd, run_dir=directory,
+        expected_seconds=expected_minutes * 60, run_id=run_id, parent_run_id=parent_run,
+    )
+    try:
+        if prepare is not None:
+            prepare(job)
+        runner.manifest(config, store, run_id)
+        runner.launch(config, job)
+    except Exception:
+        # An ambiguous timeout may mean that the service actually started.
+        # Never free such a slot automatically.
+        check = subprocess.run(
+            ["systemctl", "--user", "show", job["unit"], "-p", "LoadState", "--value"],
+            text=True, capture_output=True, timeout=10,
+        )
+        if check.returncode == 0 and check.stdout.strip() == "not-found":
+            store.finish(run_id, user["uid"], state="failed", service_result="launch-failed")
+            runner.manifest(config, store, run_id)
+        else:
+            store.review(run_id, user["uid"], "service launch result was ambiguous")
+        raise
+    return job
+
+
 def execute(args):
     os.umask(0o007)
     if not args.config:
@@ -91,54 +146,12 @@ def execute(args):
         print("Initialized " + config["database"])
         return
     if args.action == "submit":
-        user = account()
-        if user["uid"] == 0:
-            raise PermissionError("submit as the research user, not through sudo")
-        if args.resource not in config["resources"]:
-            raise ValueError("unknown resource")
-        command = args.command
-        if command[:1] == ["--"]:
-            command = command[1:]
-        if not command:
-            raise ValueError("supply a command after --")
-        cwd = Path(args.cwd).expanduser().resolve()
-        if not cwd.is_dir():
-            raise ValueError("working directory does not exist")
-        if "/" in command[0]:
-            executable = Path(command[0]).expanduser()
-            # Preserve interpreter symlinks: resolving a venv's bin/python to
-            # /usr/bin/python loses that virtual environment at execution time.
-            command[0] = os.path.abspath(cwd / executable)
-        else:
-            executable = shutil.which(command[0])
-            if executable is None:
-                raise ValueError("command is not in your PATH")
-            command[0] = executable
-        run_id = new_id()
-        directory = run_path(config, user, args.experiment, run_id)
-        directory.mkdir(parents=True, exist_ok=False, mode=0o700)
-        job = store.submit(
-            user=user, resource=args.resource, description=args.description or args.experiment,
-            experiment_id=args.experiment, command=command, cwd=cwd, run_dir=directory,
-            expected_seconds=args.expected_minutes * 60, run_id=run_id, parent_run_id=args.parent_run,
+        job = submit_job(
+            config, experiment=args.experiment, resource=args.resource,
+            description=args.description, expected_minutes=args.expected_minutes,
+            command=args.command, cwd=args.cwd, parent_run=args.parent_run,
         )
-        runner.manifest(config, store, run_id)
-        try:
-            runner.launch(config, job)
-        except Exception:
-            # An ambiguous timeout may mean that the service actually started.
-            # Never free such a slot automatically.
-            check = subprocess.run(
-                ["systemctl", "--user", "show", job["unit"], "-p", "LoadState", "--value"],
-                text=True, capture_output=True, timeout=10,
-            )
-            if check.returncode == 0 and check.stdout.strip() == "not-found":
-                store.finish(run_id, user["uid"], state="failed", service_result="launch-failed")
-                runner.manifest(config, store, run_id)
-            else:
-                store.review(run_id, user["uid"], "service launch result was ambiguous")
-            raise
-        print(run_id)
+        print(job["run_id"])
     elif args.action in ("status", "history"):
         jobs = store.jobs(include_history=args.action == "history")
         if args.action == "history" and args.experiment:
