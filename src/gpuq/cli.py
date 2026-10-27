@@ -62,6 +62,14 @@ def parser():
     banner.add_argument("--write", metavar="FILE")
     for name in ("_worker", "_finalize"):
         commands.add_parser(name, help=argparse.SUPPRESS).add_argument("run_id")
+    tandem = commands.add_parser("tandem", help="coordinate FIFO reservations across hosts")
+    actions = tandem.add_subparsers(dest="tandem_action", required=True)
+    actions.add_parser("submit", help="launch a managed coordinator").add_argument("plan")
+    for name in ("show", "cancel"):
+        actions.add_parser(name).add_argument("directory")
+    commands.add_parser("_tandem-worker", help=argparse.SUPPRESS).add_argument("directory")
+    commands.add_parser("_tandem-rpc", help=argparse.SUPPRESS)
+    commands.add_parser("_tandem-member", help=argparse.SUPPRESS).add_argument("run_id")
     return root
 
 
@@ -135,10 +143,19 @@ def submit_job(config, *, experiment, resource, description, expected_minutes,
 
 def execute(args):
     os.umask(0o007)
+    if args.action in {"tandem", "_tandem-worker"}:
+        from . import tandem
+        return tandem.execute(args)
     if not args.config:
         raise ValueError("provide --config or set GPUQ_CONFIG")
     config = load(args.config)
     store = Store(config["database"])
+    if args.action in {"_tandem-rpc", "_tandem-member"}:
+        from . import tandem
+        if args.action == "_tandem-rpc":
+            print(json.dumps(tandem.rpc(config, json.load(sys.stdin))))
+            return 0
+        return tandem.participant(config, args.run_id)
     if args.action == "init":
         local_database(config["database"])
         group = grp.getgrnam(args.group).gr_gid if args.group else os.getgid()
