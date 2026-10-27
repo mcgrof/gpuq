@@ -18,6 +18,7 @@ systemd user services. It has no network server or root experiment runner.
 - Persistent runs and events, grouped by experiment ID with unique run IDs.
 - systemd process supervision and cleanup before releasing a reservation.
 - Cancellation, remaining-time estimates, pinning, and interrupted-run recovery.
+- [Tandem reservations](docs/tandem.md) with multi-host start barriers and renewable leases.
 - Optional NVIDIA/AMD telemetry through [gputop](https://github.com/mcgrof/gputop).
   Samples append to JSONL with bounded in-memory summaries.
 - A MOTD snapshot with username first, description, start/end estimate and run ID.
@@ -122,6 +123,15 @@ Use a distinct `host` alias for each host sharing an archive destination.
 Actual machine names, usernames, paths, device identities and source revisions
 in runtime records are private deployment data. Publishing a research artifact
 requires a separate review of those records.
+
+## Coordinated multi-host jobs
+
+Use `gpuq tandem submit /path/to/private/plan.json` when an experiment needs
+several hosts reserved together. Each member keeps the ordinary local FIFO
+and device guard. Payloads wait for every reservation; renewable leases stop
+members when coordination is lost. Canonical resource ordering avoids crossed
+reservation deadlocks. Read [the tandem guide](docs/tandem.md) for private plan
+format, cancellation, timeouts and the distinction from atomic gang scheduling.
 
 ## GPU telemetry
 
