@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import contextlib
 import json
 import os
 import signal
@@ -8,7 +9,7 @@ import time
 from pathlib import Path
 
 from .config import account, run_path
-from .store import Store, now
+from .store import PREEMPT_STOP, Store, now
 from .telemetry import Telemetry
 from .util import atomic_json
 
@@ -74,6 +75,10 @@ def launch(config, job):
     subprocess.run(command, check=True, timeout=20)
 
 
+def preempt_file(job):
+    return Path(job["run_dir"]) / "preempt.json"
+
+
 def manifest(config, store, run_id):
     job = store.get(run_id)
     directory = Path(job["run_dir"])
@@ -124,6 +129,11 @@ def worker(config, run_id):
     monitor = None
     process = None
     exit_code = 1
+    preempting = 0
+    # Preemption notice: the job's signal (if any) goes to the payload's main process only, and
+    # $GPUQ_PREEMPT_FILE appears for payloads that poll. A shell wrapper must trap and forward
+    # the signal (or exec its program): an untrapped SIGUSR1 terminates bash.
+    preempt_signal = job["preempt_signal"]
     try:
         print(f"gpuq {run_id}: waiting for {job['resource']}", flush=True)
         while not stopping:
@@ -134,6 +144,9 @@ def worker(config, run_id):
             store.heartbeat(run_id, os.getuid())
             if guard_idle(resource) and store.claim(run_id, os.getuid()):
                 break
+            preempted = store.preempt_for(run_id, os.getuid())
+            if preempted:
+                print(f"gpuq {run_id}: asked low-priority {preempted} to yield", flush=True)
             time.sleep(config["poll_seconds"])
         if stopping:
             exit_code = 130
@@ -149,8 +162,12 @@ def worker(config, run_id):
         environment.update(resource.get("environment", {}))
         environment.update({
             "GPUQ_RUN_ID": run_id, "GPUQ_EXPERIMENT_ID": job["experiment_id"],
-            "GPUQ_RUN_DIR": job["run_dir"],
+            "GPUQ_RUN_DIR": job["run_dir"], "GPUQ_PRIORITY": job["priority"],
+            "GPUQ_PREEMPT_FILE": str(preempt_file(job)), "GPUQ_PREEMPT_SIGNAL": preempt_signal,
+            "GPUQ_ATTEMPT": str(job["requeues"] + 1),
         })
+        # A notice from an earlier attempt must not stop this one.
+        preempt_file(job).unlink(missing_ok=True)
         print(f"gpuq {run_id}: running {job['command'][0]}", flush=True)
         with (logs / "stdout.log").open("ab") as stdout, (logs / "stderr.log").open("ab") as stderr:
             process = subprocess.Popen(
@@ -158,11 +175,28 @@ def worker(config, run_id):
                 stdout=stdout, stderr=stderr,
             )
             last_heartbeat = 0
+            deadline = None
             while process.poll() is None:
                 if time.monotonic() - last_heartbeat >= config["poll_seconds"]:
                     store.heartbeat(run_id, os.getuid())
                     last_heartbeat = time.monotonic()
-                    stopping = stopping or bool(store.get(run_id)["cancel_requested"])
+                    current = store.get(run_id)
+                    stopping = stopping or bool(current["cancel_requested"])
+                    if current["preempt_requested"] > preempting:
+                        preempting = current["preempt_requested"]
+                        grace = current["preempt_grace_seconds"]
+                        deadline = deadline or time.monotonic() + grace
+                        atomic_json(preempt_file(job), {
+                            "requested_at": now(), "grace_seconds": grace,
+                            "mode": "stop" if preempting == PREEMPT_STOP else "requeue",
+                        })
+                        if preempt_signal != "none":
+                            with contextlib.suppress(ProcessLookupError):
+                                process.send_signal(signal.Signals[preempt_signal])
+                        print(f"gpuq {run_id}: preemption requested; {grace:.0f} s to checkpoint", flush=True)
+                if deadline is not None and time.monotonic() > deadline:
+                    print(f"gpuq {run_id}: preemption grace expired; terminating", flush=True)
+                    stopping = stopping or "grace"
                 if stopping:
                     process.terminate()
                     try:
@@ -173,7 +207,7 @@ def worker(config, run_id):
                     break
                 time.sleep(min(config["poll_seconds"], 0.5))
             exit_code = process.returncode
-        if stopping:
+        if stopping is True:
             exit_code = 130
         return max(0, exit_code) if exit_code >= 0 else 128 - exit_code
     finally:
@@ -181,7 +215,8 @@ def worker(config, run_id):
             monitor.stop()
         atomic_json(directory / "outcome.json", {
             "command_exit_code": exit_code, "worker_finished_at": now(),
-            "cancelled": stopping, "pid": process.pid if process else None,
+            "cancelled": stopping is True, "pid": process.pid if process else None,
+            "preempted": bool(preempting), "attempt": job["requeues"] + 1,
         })
         # The slot is deliberately NOT released here: systemd kills remaining
         # service children before running the stop-post finalizer.
@@ -207,8 +242,35 @@ def finalize(config, run_id):
         state = "cancelled"
     elif result == "success" and exit_code == 0:
         state = "completed"
+    elif outcome.get("preempted") and job["preempt_requested"] == PREEMPT_STOP:
+        state = "cancelled"
+    elif outcome.get("preempted"):
+        return requeue(config, store, job)
     else:
         state = "failed"
     store.finish(run_id, os.getuid(), state=state, exit_code=exit_code, service_result=result)
     manifest(config, store, run_id)
     print(f"gpuq {run_id}: {state}", flush=True)
+
+
+def requeue(config, store, job):
+    """A preempted run goes back to the queue under a fresh unit (this one is still in stop-post),
+    in its own run directory, so the payload can resume from $GPUQ_RUN_DIR/checkpoints."""
+    run_id = job["run_id"]
+    store.requeue(run_id, os.getuid(), f"gpuq-{run_id}-r{job['requeues'] + 1}.service")
+    manifest(config, store, run_id)
+    job = store.get(run_id)
+    try:
+        launch(config, job)
+    except Exception:
+        check = subprocess.run(
+            ["systemctl", "--user", "show", job["unit"], "-p", "LoadState", "--value"],
+            text=True, capture_output=True, timeout=10,
+        )
+        if check.returncode == 0 and check.stdout.strip() == "not-found":
+            store.finish(run_id, os.getuid(), state="failed", service_result="requeue-launch-failed")
+        else:
+            store.review(run_id, os.getuid(), "requeued service launch result was ambiguous")
+        manifest(config, store, run_id)
+        raise
+    print(f"gpuq {run_id}: preempted and requeued as {job['unit']}", flush=True)

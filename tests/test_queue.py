@@ -21,12 +21,96 @@ class QueueTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def submit(self, name, uid=1000, resource="gpu"):
+    def submit(self, name, uid=1000, resource="gpu", priority="normal"):
         return self.store.submit(
             user={"uid": uid, "user": f"user{uid}"}, resource=resource,
             description="Example", experiment_id="demo", run_id=name, command=["/bin/true"],
-            cwd="/tmp", run_dir=self.root / name, expected_seconds=60,
+            cwd="/tmp", run_dir=self.root / name, expected_seconds=60, priority=priority,
         )
+
+    def test_normal_jobs_claim_before_earlier_low_priority_jobs(self):
+        self.submit("low-1", priority="low")
+        self.submit("low-2", priority="low")
+        self.submit("normal", 1001)
+        self.assertFalse(self.store.claim("low-1", 1000))
+        self.assertTrue(self.store.claim("normal", 1001))
+        self.store.finish("normal", 1001, state="completed", exit_code=0)
+        self.assertFalse(self.store.claim("low-2", 1000))
+        self.assertTrue(self.store.claim("low-1", 1000))
+
+    def test_waiting_normal_job_preempts_only_a_running_low_job(self):
+        self.submit("low", priority="low")
+        self.store.claim("low", 1000)
+        self.submit("normal-1", 1001)
+        self.submit("normal-2", 1001)
+        self.assertIsNone(self.store.preempt_for("normal-2", 1001))  # not the queue head
+        self.assertEqual(self.store.preempt_for("normal-1", 1001), "low")
+        self.assertIsNone(self.store.preempt_for("normal-1", 1001))  # already requested
+        self.assertEqual(self.store.get("low")["preempt_requested"], 1)
+        self.assertEqual(self.store.get("low")["state"], "running")  # the slot stays held
+        self.assertFalse(self.store.claim("normal-1", 1001))
+
+    def test_normal_running_job_is_never_preempted_by_the_queue(self):
+        self.submit("first")
+        self.store.claim("first", 1000)
+        self.submit("second", 1001)
+        self.assertIsNone(self.store.preempt_for("second", 1001))
+        self.assertEqual(self.store.get("first")["preempt_requested"], 0)
+
+    def test_preemption_permissions(self):
+        self.submit("normal")
+        self.store.claim("normal", 1000)
+        with self.assertRaises(PermissionError):
+            self.store.request_preemption("normal", 1001)
+        self.assertTrue(self.store.request_preemption("normal", 1000))
+        self.store.finish("normal", 1000, state="completed", exit_code=0)
+        self.submit("low", priority="low")
+        self.store.claim("low", 1000)
+        with self.assertRaises(PermissionError):
+            self.store.request_preemption("low", 1001, mode=2)  # only the owner may stop it
+        self.assertTrue(self.store.request_preemption("low", 1001))
+        self.assertFalse(self.store.request_preemption("low", 1001))
+        self.assertTrue(self.store.request_preemption("low", 1000, mode=2))  # owner upgrades to stop
+
+    def test_requeue_releases_the_slot_and_keeps_the_low_job_first_among_low(self):
+        self.submit("low-1", priority="low")
+        self.store.claim("low-1", 1000)
+        self.submit("low-2", priority="low")
+        self.submit("normal", 1001)
+        self.store.preempt_for("normal", 1001)
+        self.store.requeue("low-1", 1000, "gpuq-low-1-r1.service")
+        row = self.store.get("low-1")
+        self.assertEqual((row["state"], row["preempt_requested"], row["requeues"], row["unit"], row["started_at"]),
+                         ("queued", 0, 1, "gpuq-low-1-r1.service", None))
+        self.assertFalse(self.store.claim("low-1", 1000))
+        self.assertTrue(self.store.claim("normal", 1001))
+        self.store.finish("normal", 1001, state="completed", exit_code=0)
+        self.assertFalse(self.store.claim("low-2", 1000))
+        self.assertTrue(self.store.claim("low-1", 1000))
+        self.assertEqual([e["event"] for e in self.store.events("low-1")],
+                         ["submitted", "started", "preemption_requested", "requeued", "started"])
+
+    def test_invalid_priority_and_signal_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.submit("first", priority="urgent")
+        with self.assertRaises(ValueError):
+            self.store.submit(user={"uid": 1000, "user": "u"}, resource="gpu", description="x",
+                              experiment_id="demo", run_id="x", command=["/bin/true"], cwd="/tmp",
+                              run_dir=self.root / "x", expected_seconds=60, preempt_signal="SIGBOGUS")
+
+    def test_database_from_an_older_release_gains_the_new_columns(self):
+        import sqlite3
+        path = self.root / "old" / "queue.sqlite3"
+        path.parent.mkdir()
+        with sqlite3.connect(path) as db:
+            db.executescript(Path(__file__).with_name("old_schema.sql").read_text())
+            db.execute("""INSERT INTO jobs(run_id,experiment_id,uid,username,resource,description,
+                          submitted_at,expected_seconds,cwd,command_json,run_dir,unit)
+                          VALUES('old','demo',1000,'u','gpu','d','2026-01-01',60,'/tmp','["/bin/true"]','/tmp/x','u')""")
+        db = None
+        store = Store(path)
+        row = store.get("old")
+        self.assertEqual((row["priority"], row["preempt_requested"], row["requeues"]), ("normal", 0, 0))
 
     def test_fifo_and_durable_history(self):
         self.submit("first")

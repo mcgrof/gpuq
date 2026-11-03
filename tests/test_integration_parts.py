@@ -29,7 +29,8 @@ class ComponentTests(unittest.TestCase):
             args = argparse.Namespace(action="submit", config="/example/config.json",
                                       resource="gpu", experiment="demo", description="test",
                                       command=[str(interpreter), "-V"], cwd=str(root),
-                                      expected_minutes=1, parent_run=None)
+                                      expected_minutes=1, parent_run=None, priority="normal",
+                                      preempt_signal="SIGUSR1", preempt_grace_minutes=15)
             with patch("gpuq.cli.load", return_value=config), patch(
                 "gpuq.cli.account", return_value={"uid": 1000, "user": "alice", "home": temp}
             ), patch("gpuq.cli.runner.launch"), patch("builtins.print"):

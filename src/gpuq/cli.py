@@ -14,7 +14,7 @@ from pathlib import Path
 from . import __version__
 from . import archive, motd, runner, snapshot
 from .config import account, identifier, load, run_path
-from .store import Store, TERMINAL, new_id
+from .store import PREEMPT_REQUEUE, PREEMPT_STOP, PRIORITIES, Store, TERMINAL, new_id
 from .util import local_database
 
 
@@ -33,6 +33,13 @@ def parser():
     submit.add_argument("--expected-minutes", type=float, required=True)
     submit.add_argument("--parent-run", type=identifier)
     submit.add_argument("--cwd", default=str(Path.cwd()))
+    submit.add_argument("--priority", choices=PRIORITIES, default="normal",
+                        help="low: runs only when no normal job waits, and yields to one that arrives")
+    submit.add_argument("--preempt-signal", default="SIGUSR1",
+                        help="signal sent to the payload's main process when it must yield (or none); "
+                             "$GPUQ_PREEMPT_FILE appears either way")
+    submit.add_argument("--preempt-grace-minutes", type=float, default=15,
+                        help="time from the preemption notice to termination")
     submit.add_argument("command", nargs=argparse.REMAINDER)
     status = commands.add_parser("status", help="show current reservations")
     status.add_argument("--json", action="store_true")
@@ -43,6 +50,9 @@ def parser():
     show.add_argument("run_id")
     cancel = commands.add_parser("cancel", help="cancel your own job and drain its systemd unit")
     cancel.add_argument("run_id")
+    preempt = commands.add_parser("preempt", help="ask a running job to checkpoint and exit; it is requeued")
+    preempt.add_argument("run_id")
+    preempt.add_argument("--stop", action="store_true", help="do not requeue: end the run as cancelled")
     recover = commands.add_parser("reconcile", help="recover your inactive run after an interrupted finalizer")
     recover.add_argument("run_id")
     for name in ("pin", "unpin"):
@@ -80,14 +90,15 @@ def print_jobs(jobs, as_json):
     print("USER\tSTATE\tRESOURCE\tRUN_ID\tEXPERIMENT")
     for job in jobs:
         print("\t".join(motd.field(value) for value in (
-            job["username"], job["state"], job["resource"], job["run_id"], job["experiment_id"]
+            job["username"], motd.state(job), job["resource"], job["run_id"], job["experiment_id"]
         )))
     if not jobs:
         print("(no runs)")
 
 
 def submit_job(config, *, experiment, resource, description, expected_minutes,
-               command, cwd, parent_run=None, run_id=None, prepare=None):
+               command, cwd, parent_run=None, run_id=None, prepare=None, priority="normal",
+               preempt_signal="SIGUSR1", preempt_grace_minutes=15):
     store = Store(config["database"])
     user = account()
     if user["uid"] == 0:
@@ -119,6 +130,7 @@ def submit_job(config, *, experiment, resource, description, expected_minutes,
         user=user, resource=resource, description=description or experiment,
         experiment_id=experiment, command=command, cwd=cwd, run_dir=directory,
         expected_seconds=expected_minutes * 60, run_id=run_id, parent_run_id=parent_run,
+        priority=priority, preempt_signal=preempt_signal, preempt_grace_seconds=preempt_grace_minutes * 60,
     )
     try:
         if prepare is not None:
@@ -167,6 +179,8 @@ def execute(args):
             config, experiment=args.experiment, resource=args.resource,
             description=args.description, expected_minutes=args.expected_minutes,
             command=args.command, cwd=args.cwd, parent_run=args.parent_run,
+            priority=args.priority, preempt_signal=args.preempt_signal,
+            preempt_grace_minutes=args.preempt_grace_minutes,
         )
         print(job["run_id"])
     elif args.action in ("status", "history"):
@@ -180,6 +194,12 @@ def execute(args):
         job = store.get(args.run_id)
         if store.cancel(args.run_id, os.getuid()):
             subprocess.run(["systemctl", "--user", "stop", job["unit"]], check=True, timeout=45)
+        print(args.run_id)
+    elif args.action == "preempt":
+        # The run's own worker sees the request at its next poll and notifies the payload.
+        mode = PREEMPT_STOP if args.stop else PREEMPT_REQUEUE
+        if not store.request_preemption(args.run_id, os.getuid(), mode, reason="gpuq preempt"):
+            raise ValueError("run is not running, or preemption was already requested")
         print(args.run_id)
     elif args.action == "reconcile":
         job = store.get(args.run_id)

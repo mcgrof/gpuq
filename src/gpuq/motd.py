@@ -16,6 +16,15 @@ def field(text):
     return "".join(char if char.isprintable() and char not in "|" else " " for char in str(text))
 
 
+def state(job):
+    text = job["state"]
+    if job.get("priority") == "low":
+        text += " (low)"
+    if job.get("preempt_requested"):
+        text += " yielding"
+    return text
+
+
 def render(jobs):
     lines = [
         BEGIN,
@@ -24,7 +33,7 @@ def render(jobs):
     for job, end in schedule(jobs, dt.datetime.now(dt.timezone.utc)):
         lines.append(" | ".join(field(value) for value in (
             job["username"], job["description"], job["started_at"] or "pending",
-            end.isoformat(timespec="seconds"), job["resource"], job["run_id"], job["state"],
+            end.isoformat(timespec="seconds"), job["resource"], job["run_id"], state(job),
         )))
     if len(lines) == 2:
         lines.append("(no reservations)")

@@ -10,8 +10,27 @@ from pathlib import Path
 
 from .config import identifier
 
+
+def signal_names():
+    import signal
+    return {item.name for item in signal.Signals}
+
 ACTIVE = ("running", "needs_review")
 TERMINAL = ("completed", "failed", "cancelled")
+PRIORITIES = ("normal", "low")
+# Queued jobs claim in this order: every normal job before any low one, FIFO within each class.
+QUEUE_ORDER = "ORDER BY priority='low', seq"
+# Columns added after the first release. Older databases gain them on first use; older gpuq
+# versions keep working against the wider table because they select by name.
+LATER_COLUMNS = {
+    "priority": "TEXT NOT NULL DEFAULT 'normal'",
+    # 0 none; 1 checkpoint and requeue; 2 checkpoint and stop (cancelled, no requeue)
+    "preempt_requested": "INTEGER NOT NULL DEFAULT 0",
+    "preempt_signal": "TEXT NOT NULL DEFAULT 'SIGUSR1'",
+    "preempt_grace_seconds": "REAL NOT NULL DEFAULT 900",
+    "requeues": "INTEGER NOT NULL DEFAULT 0",
+}
+PREEMPT_REQUEUE, PREEMPT_STOP = 1, 2
 
 
 def now():
@@ -31,6 +50,20 @@ def new_id():
 class Store:
     def __init__(self, path):
         self.path = Path(path)
+        self.migrated = False
+
+    @staticmethod
+    def migrate(db):
+        present = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        for name, declaration in LATER_COLUMNS.items():
+            if name not in present:
+                try:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+                except sqlite3.OperationalError as error:
+                    # Another process added it between the check and the ALTER.
+                    if "duplicate column" not in str(error):
+                        raise
+        db.commit()
 
     def initialize(self, gid=None):
         if self.path.parent.exists():
@@ -84,6 +117,7 @@ class Store:
                         details_json TEXT NOT NULL
                     );
                 """)
+                self.migrate(db)
             if gid is not None:
                 os.chown(self.path, -1, gid)
             self.path.chmod(0o660)
@@ -98,6 +132,9 @@ class Store:
         db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=10000")
+        if not self.migrated:
+            self.migrate(db)
+            self.migrated = True
         try:
             if write:
                 db.execute("BEGIN IMMEDIATE")
@@ -134,7 +171,8 @@ class Store:
         )
 
     def submit(self, *, user, resource, description, experiment_id, command,
-               cwd, run_dir, expected_seconds, run_id=None, parent_run_id=None):
+               cwd, run_dir, expected_seconds, run_id=None, parent_run_id=None,
+               priority="normal", preempt_signal="SIGUSR1", preempt_grace_seconds=900):
         run_id = identifier(run_id or new_id())
         identifier(experiment_id)
         identifier(resource)
@@ -142,6 +180,12 @@ class Store:
             identifier(parent_run_id)
         if not math.isfinite(expected_seconds) or expected_seconds <= 0:
             raise ValueError("expected runtime must be positive")
+        if priority not in PRIORITIES:
+            raise ValueError("priority must be one of " + ", ".join(PRIORITIES))
+        if preempt_signal != "none" and preempt_signal not in signal_names():
+            raise ValueError("preempt signal must be a signal name such as SIGUSR1, or none")
+        if not math.isfinite(preempt_grace_seconds) or preempt_grace_seconds < 0:
+            raise ValueError("preemption grace must be finite and nonnegative")
         if not command or not all(isinstance(item, str) and "\0" not in item for item in command):
             raise ValueError("command must be a nonempty argv list without NUL characters")
         if len(json.dumps(command)) > 65536 or len(description) > 512:
@@ -149,13 +193,15 @@ class Store:
         with self.connection(write=True) as db:
             db.execute(
                 """INSERT INTO jobs(run_id,experiment_id,parent_run_id,uid,username,resource,
-                   description,submitted_at,expected_seconds,cwd,command_json,run_dir,unit)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   description,submitted_at,expected_seconds,cwd,command_json,run_dir,unit,
+                   priority,preempt_signal,preempt_grace_seconds)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, experiment_id, parent_run_id, user["uid"], user["user"], resource,
                  description, now(), expected_seconds, str(cwd), json.dumps(command),
-                 str(run_dir), f"gpuq-{run_id}.service"),
+                 str(run_dir), f"gpuq-{run_id}.service", priority, preempt_signal,
+                 preempt_grace_seconds),
             )
-            self.event(db, run_id, "submitted")
+            self.event(db, run_id, "submitted", {"priority": priority} if priority != "normal" else None)
         return self.get(run_id)
 
     def get(self, run_id):
@@ -186,7 +232,7 @@ class Store:
                 (row["resource"],),
             ).fetchone()
             head = db.execute(
-                "SELECT run_id FROM jobs WHERE resource=? AND state='queued' ORDER BY seq LIMIT 1",
+                f"SELECT run_id FROM jobs WHERE resource=? AND state='queued' {QUEUE_ORDER} LIMIT 1",
                 (row["resource"],),
             ).fetchone()
             if active or head["run_id"] != run_id:
@@ -214,6 +260,63 @@ class Store:
             self.event(db, run_id, "cancellation_requested")
             # A running slot remains held until systemd's stop-post finalizer.
             return True
+
+    def request_preemption(self, run_id, uid, mode=PREEMPT_REQUEUE, reason=None):
+        """Ask a running job to checkpoint and exit at its next stopping point. Owners may preempt
+        their own runs; any queue member may preempt a low-priority run."""
+        if mode not in (PREEMPT_REQUEUE, PREEMPT_STOP):
+            raise ValueError("invalid preemption mode")
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError("unknown run ID")
+            if row["uid"] != uid and (row["priority"] != "low" or mode != PREEMPT_REQUEUE):
+                raise PermissionError("only the submitting user may preempt a normal-priority run")
+            if row["state"] != "running" or row["cancel_requested"] or row["preempt_requested"] >= mode:
+                return False
+            db.execute("UPDATE jobs SET preempt_requested=? WHERE run_id=?", (mode, run_id))
+            self.event(db, run_id, "preemption_requested",
+                       {"mode": "stop" if mode == PREEMPT_STOP else "requeue", "uid": uid, "reason": reason})
+            return True
+
+    def preempt_for(self, run_id, uid):
+        """Called by a waiting normal-priority job: if it heads the queue and a low-priority run holds
+        the resource, ask that run to yield. Returns the preempted run ID, or None."""
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+            self.owned(row, uid)
+            if row["state"] != "queued" or row["cancel_requested"] or row["priority"] != "normal":
+                return None
+            head = db.execute(
+                f"SELECT run_id FROM jobs WHERE resource=? AND state='queued' {QUEUE_ORDER} LIMIT 1",
+                (row["resource"],),
+            ).fetchone()
+            active = db.execute(
+                "SELECT * FROM jobs WHERE resource=? AND state IN ('running','needs_review')",
+                (row["resource"],),
+            ).fetchone()
+            if (head["run_id"] != run_id or active is None or active["state"] != "running"
+                    or active["priority"] != "low" or active["preempt_requested"] or active["cancel_requested"]):
+                return None
+            db.execute("UPDATE jobs SET preempt_requested=? WHERE run_id=?", (PREEMPT_REQUEUE, active["run_id"]))
+            self.event(db, active["run_id"], "preemption_requested",
+                       {"mode": "requeue", "uid": uid, "reason": "queued " + run_id})
+            return active["run_id"]
+
+    def requeue(self, run_id, uid, unit):
+        """Return a preempted run to the queue under a new service unit. It keeps its sequence number,
+        so it resumes ahead of later jobs of its priority."""
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+            self.owned(row, uid)
+            if row["state"] not in ACTIVE:
+                raise ValueError("only an active run can be requeued")
+            db.execute(
+                """UPDATE jobs SET state='queued',started_at=NULL,expected_end=NULL,preempt_requested=0,
+                   unit=?,requeues=requeues+1 WHERE run_id=?""",
+                (unit, run_id),
+            )
+            self.event(db, run_id, "requeued", {"unit": unit, "requeues": row["requeues"] + 1})
 
     def finish(self, run_id, uid, *, state, exit_code=None, service_result=None):
         if state not in TERMINAL:

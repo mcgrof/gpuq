@@ -18,7 +18,9 @@ SQLite stores two tables:
 Submission assigns an increasing FIFO sequence. A claim uses BEGIN
 IMMEDIATE, checks the first waiting row, and transitions it to running.
 A partial unique index enforces at most one running/review row per
-resource. Estimates and wall-clock timestamps do not determine order.
+resource. Estimates and wall-clock timestamps do not determine order,
+except that every normal-priority job claims before any low-priority one
+(see [preemption](preemption.md)).
 
 The database lives on local disk. Queue participants share a setgid state
 directory through a Unix group or explicit ACLs. WAL and busy timeouts

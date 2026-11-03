@@ -47,9 +47,11 @@ def read_live(config, resource, instant):
 
 
 def schedule(jobs, instant):
-    """Yield (job, expected_end) for unfinished jobs in FIFO order."""
+    """Yield (job, expected_end) for unfinished jobs: active first, then in claim order
+    (normal before low priority, FIFO within each)."""
     cursors = {}
-    for job in sorted(jobs, key=lambda row: row["seq"]):
+    order = lambda row: (row["state"] not in ACTIVE, row.get("priority") == "low", row["seq"])
+    for job in sorted(jobs, key=order):
         if job["state"] in {"completed", "failed", "cancelled"}:
             continue
         resource = job["resource"]
@@ -73,6 +75,8 @@ def build(config, jobs, instant=None):
             "run_id", "experiment_id", "username", "description", "state",
             "submitted_at", "started_at", "expected_seconds", "cancel_requested",
         )}
+        entry["priority"] = job.get("priority", "normal")
+        entry["preempt_requested"] = bool(job.get("preempt_requested"))
         entry["cancel_requested"] = bool(entry["cancel_requested"])
         entry["expected_end"] = end.isoformat(timespec="seconds")
         entry["remaining_seconds"] = max(0, round((end - instant).total_seconds()))
