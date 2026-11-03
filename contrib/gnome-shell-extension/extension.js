@@ -15,6 +15,11 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 const SCHEMA = 1;
 const COMMAND_TIMEOUT_SECONDS = 20;
 
+// At most this many queued jobs of each priority are listed per slot; the
+// rest are folded into a single "+N more" line so a low-priority backlog
+// cannot push the active run and the normal queue off the screen.
+const QUEUE_SHOWN = { normal: 8, low: 4 };
+
 function minutes(seconds) {
     let total = Math.max(0, Math.round(seconds / 60));
     return total >= 60 ? `${Math.floor(total / 60)}h ${total % 60}m` : `${total}m`;
@@ -22,6 +27,28 @@ function minutes(seconds) {
 
 function number(value, digits = 0) {
     return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : null;
+}
+
+// One menu line for a queued job. Low-priority jobs are marked and kept
+// terse (their start estimate is speculative, as any normal job preempts
+// them); normal jobs carry their position and an estimated start.
+function queueLine(job) {
+    if (job.priority === 'low') {
+        let tag = job.cancel_requested ? ' · cancelling' : job.preempt_requested ? ' · yielding' : '';
+        return `    ↓ ${job.username} · ${job.experiment_id}${tag}`;
+    }
+    let tail = job.cancel_requested ? 'cancelling'
+        : `starts in ~${minutes(job.remaining_seconds - job.expected_seconds)}`;
+    return `    ${job.position}. ${job.username} · ${job.experiment_id} — ${tail}`;
+}
+
+function queueSummary(normal, low) {
+    let bits = [];
+    if (normal.length)
+        bits.push(`${normal.length} normal`);
+    if (low.length)
+        bits.push(`${low.length} low`);
+    return bits.join(', ');
 }
 
 // Run a command through sh and resolve with its parsed snapshot JSON.
@@ -104,10 +131,20 @@ class GpuqButton extends PanelMenu.Button {
         this.menu.addMenuItem(item);
     }
 
+    // List up to `limit` queued jobs, then fold any remainder into one line.
+    _listQueue(jobs, limit, style) {
+        for (let job of jobs.slice(0, limit))
+            this._item(queueLine(job), style);
+        let extra = jobs.length - limit;
+        if (extra > 0)
+            this._item(`    … +${extra} more`, style);
+    }
+
     _render(results) {
         this.menu.removeAll();
         let parts = [];
-        let waiting = 0;
+        let waitingNormal = 0;
+        let waitingLow = 0;
         let failed = 0;
         for (let { command, view, error } of results) {
             this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem(view?.host ?? command));
@@ -120,12 +157,18 @@ class GpuqButton extends PanelMenu.Button {
                 let telemetry = slot.telemetry && !slot.telemetry.stale ? slot.telemetry.stats ?? {} : {};
                 let util = number(telemetry.utilization);
                 let name = view.resources.length > 1 || results.length > 1 ? `${view.host}/${slot.name}` : slot.name;
-                waiting += slot.queue.length;
+                let normal = slot.queue.filter(job => job.priority !== 'low');
+                let low = slot.queue.filter(job => job.priority === 'low');
+                waitingNormal += normal.length;
+                waitingLow += low.length;
                 let active = slot.active;
                 if (active) {
                     parts.push(util === null ? name : `${name} ${util}%`);
-                    let state = active.state === 'running' ? '' : ` [${active.state}]`;
-                    this._item(`${slot.name}: ${active.username} · ${active.experiment_id}${state}`, 'gpuq-host');
+                    let flag = active.priority === 'low' ? ' ↓low' : '';
+                    let state = active.cancel_requested ? ' [cancelling]'
+                        : active.preempt_requested ? ' [yielding]'
+                        : active.state === 'running' ? '' : ` [${active.state}]`;
+                    this._item(`${slot.name}: ${active.username} · ${active.experiment_id}${flag}${state}`, 'gpuq-host');
                     this._item(`    ${active.description} — ~${minutes(active.remaining_seconds)} left`, 'gpuq-detail');
                 } else {
                     this._item(`${slot.name}: idle`, 'gpuq-idle');
@@ -138,16 +181,19 @@ class GpuqButton extends PanelMenu.Button {
                 ].filter(Boolean);
                 if (stats.length)
                     this._item(`    ${stats.join(' · ')}`, 'gpuq-detail');
-                for (let job of slot.queue)
-                    this._item(`    ${job.position}. ${job.username} · ${job.experiment_id} — starts in ~${
-                        minutes(job.remaining_seconds - job.expected_seconds)}`, 'gpuq-detail');
+                if (slot.queue.length)
+                    this._item(`    queue: ${queueSummary(normal, low)}`, 'gpuq-queue');
+                this._listQueue(normal, QUEUE_SHOWN.normal, 'gpuq-detail');
+                this._listQueue(low, QUEUE_SHOWN.low, 'gpuq-low');
             }
         }
         if (!results.length)
             this._item('No sources configured', 'gpuq-idle');
         let text = parts.join('  ') || 'idle';
-        if (waiting)
-            text += ` +${waiting}`;
+        if (waitingNormal)
+            text += ` +${waitingNormal}`;
+        if (waitingLow)
+            text += ` ↓${waitingLow}`;
         if (failed)
             text += ' ⚠';
         this._label.set_text(text);

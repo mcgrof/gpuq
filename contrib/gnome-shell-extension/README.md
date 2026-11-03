@@ -4,8 +4,12 @@
 ![gpuq extension showing two hosts, one idle and one with a running experiment and eleven queued runs](../../docs/images/gnome-extension.jpg)
 
 Shows gpuq reservations, queued experiments and live GPU telemetry in the
-top bar, e.g. `gpu 91% +1` (busy at 91%, one run waiting). The menu lists
-each host's active run, remaining estimate, gputop stats and FIFO queue.
+top bar, e.g. `gpu 91% +1` (busy at 91%, one normal run waiting); a
+low-priority backlog reads compactly as `↓N`. The menu lists each host's
+active run, remaining estimate and gputop stats, then the queue grouped by
+priority: normal runs with their estimated start, and low-priority runs
+dimmed below. Each group shows only its first few jobs and folds the rest
+into a `… +N more` line, so a large low-priority backlog stays readable.
 
 It polls one or more commands that print `gpuq snapshot` JSON, so remote
 hosts work through ssh with key-based, non-interactive login:

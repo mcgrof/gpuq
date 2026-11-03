@@ -4,3 +4,5 @@
 .gpuq-error { color: #ed333b; }
 .gpuq-host { font-weight: bold; }
 .gpuq-detail { color: #c0bfbc; font-size: 0.9em; }
+.gpuq-queue { color: #c0bfbc; font-size: 0.9em; font-weight: bold; }
+.gpuq-low { color: #908f8c; font-size: 0.9em; font-style: italic; }
