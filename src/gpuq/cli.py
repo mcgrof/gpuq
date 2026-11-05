@@ -40,6 +40,13 @@ def parser():
                              "$GPUQ_PREEMPT_FILE appears either way")
     submit.add_argument("--preempt-grace-minutes", type=float, default=15,
                         help="time from the preemption notice to termination")
+    submit.add_argument("--timeout-minutes", type=float,
+                        help="terminate the payload after this long (per attempt); the run fails")
+    submit.add_argument("--idle-minutes", type=float,
+                        help="terminate the payload once the device has stayed at or below --idle-percent "
+                             "utilization this long (needs telemetry); the run fails")
+    submit.add_argument("--idle-percent", type=float, default=5,
+                        help="utilization at or below which the device counts as idle (default 5)")
     submit.add_argument("command", nargs=argparse.REMAINDER)
     status = commands.add_parser("status", help="show current reservations")
     status.add_argument("--json", action="store_true")
@@ -98,7 +105,8 @@ def print_jobs(jobs, as_json):
 
 def submit_job(config, *, experiment, resource, description, expected_minutes,
                command, cwd, parent_run=None, run_id=None, prepare=None, priority="normal",
-               preempt_signal="SIGUSR1", preempt_grace_minutes=15):
+               preempt_signal="SIGUSR1", preempt_grace_minutes=15, timeout_minutes=None,
+               idle_minutes=None, idle_percent=5):
     store = Store(config["database"])
     user = account()
     if user["uid"] == 0:
@@ -131,6 +139,8 @@ def submit_job(config, *, experiment, resource, description, expected_minutes,
         experiment_id=experiment, command=command, cwd=cwd, run_dir=directory,
         expected_seconds=expected_minutes * 60, run_id=run_id, parent_run_id=parent_run,
         priority=priority, preempt_signal=preempt_signal, preempt_grace_seconds=preempt_grace_minutes * 60,
+        timeout_seconds=None if timeout_minutes is None else timeout_minutes * 60,
+        idle_seconds=None if idle_minutes is None else idle_minutes * 60, idle_percent=idle_percent,
     )
     try:
         if prepare is not None:
@@ -180,7 +190,8 @@ def execute(args):
             description=args.description, expected_minutes=args.expected_minutes,
             command=args.command, cwd=args.cwd, parent_run=args.parent_run,
             priority=args.priority, preempt_signal=args.preempt_signal,
-            preempt_grace_minutes=args.preempt_grace_minutes,
+            preempt_grace_minutes=args.preempt_grace_minutes, timeout_minutes=args.timeout_minutes,
+            idle_minutes=args.idle_minutes, idle_percent=args.idle_percent,
         )
         print(job["run_id"])
     elif args.action in ("status", "history"):

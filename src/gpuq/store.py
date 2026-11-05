@@ -29,6 +29,10 @@ LATER_COLUMNS = {
     "preempt_signal": "TEXT NOT NULL DEFAULT 'SIGUSR1'",
     "preempt_grace_seconds": "REAL NOT NULL DEFAULT 900",
     "requeues": "INTEGER NOT NULL DEFAULT 0",
+    # Optional per-attempt limits enforced by the worker; NULL means none.
+    "timeout_seconds": "REAL",
+    "idle_seconds": "REAL",
+    "idle_percent": "REAL NOT NULL DEFAULT 5",
 }
 PREEMPT_REQUEUE, PREEMPT_STOP = 1, 2
 
@@ -172,7 +176,8 @@ class Store:
 
     def submit(self, *, user, resource, description, experiment_id, command,
                cwd, run_dir, expected_seconds, run_id=None, parent_run_id=None,
-               priority="normal", preempt_signal="SIGUSR1", preempt_grace_seconds=900):
+               priority="normal", preempt_signal="SIGUSR1", preempt_grace_seconds=900,
+               timeout_seconds=None, idle_seconds=None, idle_percent=5):
         run_id = identifier(run_id or new_id())
         identifier(experiment_id)
         identifier(resource)
@@ -186,6 +191,11 @@ class Store:
             raise ValueError("preempt signal must be a signal name such as SIGUSR1, or none")
         if not math.isfinite(preempt_grace_seconds) or preempt_grace_seconds < 0:
             raise ValueError("preemption grace must be finite and nonnegative")
+        for limit in (timeout_seconds, idle_seconds):
+            if limit is not None and (not math.isfinite(limit) or limit <= 0):
+                raise ValueError("timeout and idle limits must be positive and finite")
+        if not math.isfinite(idle_percent) or not 0 <= idle_percent < 100:
+            raise ValueError("idle percent must be in [0, 100)")
         if not command or not all(isinstance(item, str) and "\0" not in item for item in command):
             raise ValueError("command must be a nonempty argv list without NUL characters")
         if len(json.dumps(command)) > 65536 or len(description) > 512:
@@ -194,14 +204,17 @@ class Store:
             db.execute(
                 """INSERT INTO jobs(run_id,experiment_id,parent_run_id,uid,username,resource,
                    description,submitted_at,expected_seconds,cwd,command_json,run_dir,unit,
-                   priority,preempt_signal,preempt_grace_seconds)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   priority,preempt_signal,preempt_grace_seconds,timeout_seconds,idle_seconds,idle_percent)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, experiment_id, parent_run_id, user["uid"], user["user"], resource,
                  description, now(), expected_seconds, str(cwd), json.dumps(command),
                  str(run_dir), f"gpuq-{run_id}.service", priority, preempt_signal,
-                 preempt_grace_seconds),
+                 preempt_grace_seconds, timeout_seconds, idle_seconds, idle_percent),
             )
-            self.event(db, run_id, "submitted", {"priority": priority} if priority != "normal" else None)
+            details = {"priority": priority} if priority != "normal" else {}
+            details.update({key: value for key, value in (("timeout_seconds", timeout_seconds),
+                                                           ("idle_seconds", idle_seconds)) if value is not None})
+            self.event(db, run_id, "submitted", details or None)
         return self.get(run_id)
 
     def get(self, run_id):
@@ -317,6 +330,12 @@ class Store:
                 (unit, run_id),
             )
             self.event(db, run_id, "requeued", {"unit": unit, "requeues": row["requeues"] + 1})
+
+    def record(self, run_id, uid, event, details=None):
+        """Append an event to the owner's run, e.g. a limit the worker enforced."""
+        with self.connection(write=True) as db:
+            self.owned(db.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone(), uid)
+            self.event(db, run_id, event, details)
 
     def finish(self, run_id, uid, *, state, exit_code=None, service_result=None):
         if state not in TERMINAL:

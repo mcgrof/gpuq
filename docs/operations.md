@@ -151,7 +151,9 @@ journalctl --user -u gpuq-RUN_ID.service
 gpuq reconcile RUN_ID
 ~~~
 
-Reconciliation refuses active services and busy GPUs. Cancel your own job
+A run that hangs while holding the device, for example a framework that
+stays alive after a worker crashed, is caught by `--idle-minutes` if it was
+submitted with one ([run limits](limits.md)). Reconciliation refuses active services and busy GPUs. Cancel your own job
 through gpuq; never delete another user's row or kill a process just
 because its estimate expired. A reboot does not automatically restart
 experiments; resume from a saved checkpoint as a new run with --parent-run.

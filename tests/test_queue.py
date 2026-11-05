@@ -28,6 +28,26 @@ class QueueTests(unittest.TestCase):
             cwd="/tmp", run_dir=self.root / name, expected_seconds=60, priority=priority,
         )
 
+    def test_limits_are_validated_stored_and_recorded(self):
+        for bad in ({"timeout_seconds": 0}, {"idle_seconds": float("inf")}, {"idle_percent": 100}):
+            with self.assertRaises(ValueError):
+                self.store.submit(
+                    user={"uid": 1000, "user": "user1000"}, resource="gpu", description="Example",
+                    experiment_id="demo", run_id="bad", command=["/bin/true"], cwd="/tmp",
+                    run_dir=self.root / "bad", expected_seconds=60, **bad,
+                )
+        job = self.store.submit(
+            user={"uid": 1000, "user": "user1000"}, resource="gpu", description="Example",
+            experiment_id="demo", run_id="limited", command=["/bin/true"], cwd="/tmp",
+            run_dir=self.root / "limited", expected_seconds=60, timeout_seconds=600, idle_seconds=300,
+        )
+        self.assertEqual((job["timeout_seconds"], job["idle_seconds"], job["idle_percent"]), (600, 300, 5))
+        self.assertIsNone(self.submit("unlimited")["timeout_seconds"])
+        with self.assertRaises(PermissionError):
+            self.store.record("limited", 1001, "limit_reached")
+        self.store.record("limited", 1000, "limit_reached", {"limit": "idle"})
+        self.assertEqual(self.store.events("limited")[-1]["event"], "limit_reached")
+
     def test_normal_jobs_claim_before_earlier_low_priority_jobs(self):
         self.submit("low-1", priority="low")
         self.submit("low-2", priority="low")
