@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gpuq import motd
-from gpuq.runner import guard_idle
+from gpuq.runner import guard_idle, limit_reached
 from gpuq.telemetry import Telemetry
 from gpuq.store import Store
 from gpuq.cli import execute
@@ -30,7 +30,8 @@ class ComponentTests(unittest.TestCase):
                                       resource="gpu", experiment="demo", description="test",
                                       command=[str(interpreter), "-V"], cwd=str(root),
                                       expected_minutes=1, parent_run=None, priority="normal",
-                                      preempt_signal="SIGUSR1", preempt_grace_minutes=15)
+                                      preempt_signal="SIGUSR1", preempt_grace_minutes=15,
+                                      timeout_minutes=None, idle_minutes=None, idle_percent=5)
             with patch("gpuq.cli.load", return_value=config), patch(
                 "gpuq.cli.account", return_value={"uid": 1000, "user": "alice", "home": temp}
             ), patch("gpuq.cli.runner.launch"), patch("builtins.print"):
@@ -100,6 +101,45 @@ class GPUMonitor:
             self.assertGreater(summary["estimated_energy_j"], 0)
             self.assertEqual(samples[0]["scope"], "device")
             self.assertTrue(samples[0]["timestamp_utc"].endswith("+00:00"))
+
+    def test_limits_end_an_attempt_only_when_reached(self):
+        job = {"timeout_seconds": 60, "idle_seconds": 30}
+        self.assertIsNone(limit_reached(job, 59, 29))
+        self.assertEqual(limit_reached(job, 60, 0), "timeout")
+        self.assertEqual(limit_reached(job, 10, 30), "idle")
+        self.assertIsNone(limit_reached(job, 10, None))  # no telemetry is not idleness
+        self.assertIsNone(limit_reached({"timeout_seconds": None, "idle_seconds": None}, 1e9, 1e9))
+
+    def test_telemetry_reports_time_since_the_device_was_last_busy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            module = root / "fake_gputop.py"
+            busy = root / "busy"
+            busy.touch()
+            module.write_text(f"""
+from pathlib import Path
+class GPUMonitor:
+    initialized = True
+    gpus = [{{"name": "Fake GPU", "type": "fake"}}]
+    def get_stats(self, index):
+        return {{"utilization": 90 if Path({str(busy)!r}).exists() else 3}}
+    def cleanup(self):
+        pass
+""")
+            config = {"host": "test", "telemetry_seconds": 0.02,
+                      "resources": {"gpu": {"gputop_module": str(module)}}}
+            job = {"run_dir": str(root), "resource": "gpu", "run_id": "test-run",
+                   "experiment_id": "demo", "idle_percent": 5}
+            monitor = Telemetry(config, job)
+            self.assertIsNone(monitor.idle_seconds())  # not started: unknown
+            monitor.start()
+            time.sleep(0.1)
+            self.assertLess(monitor.idle_seconds(), 0.08)
+            busy.unlink()  # utilization drops to 3%, at or below the threshold
+            time.sleep(0.3)
+            self.assertGreater(monitor.idle_seconds(), 0.2)
+            monitor.stop()
+            self.assertIsNone(monitor.idle_seconds())
 
     def test_required_telemetry_failure_is_explicit(self):
         with tempfile.TemporaryDirectory() as temp:

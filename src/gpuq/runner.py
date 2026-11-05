@@ -79,6 +79,17 @@ def preempt_file(job):
     return Path(job["run_dir"]) / "preempt.json"
 
 
+def limit_reached(job, elapsed, idle):
+    """Which of the run's own limits, if any, ends this attempt: "timeout" once the payload has run
+    timeout_seconds, "idle" once the device has stayed at or below idle_percent for idle_seconds.
+    An unknown idle time (no telemetry) never triggers the idle limit."""
+    if job.get("timeout_seconds") and elapsed >= job["timeout_seconds"]:
+        return "timeout"
+    if job.get("idle_seconds") and idle is not None and idle >= job["idle_seconds"]:
+        return "idle"
+    return None
+
+
 def manifest(config, store, run_id):
     job = store.get(run_id)
     directory = Path(job["run_dir"])
@@ -130,6 +141,7 @@ def worker(config, run_id):
     process = None
     exit_code = 1
     preempting = 0
+    limit = None
     # Preemption notice: the job's signal (if any) goes to the payload's main process only, and
     # $GPUQ_PREEMPT_FILE appears for payloads that poll. A shell wrapper must trap and forward
     # the signal (or exec its program): an untrapped SIGUSR1 terminates bash.
@@ -158,6 +170,8 @@ def worker(config, run_id):
         manifest(config, store, run_id)
         monitor = Telemetry(config, job)
         monitor.start()
+        if job["idle_seconds"] and monitor.thread is None:
+            print(f"gpuq {run_id}: no telemetry, so the idle limit cannot be enforced", flush=True)
         environment = dict(os.environ)
         environment.update(resource.get("environment", {}))
         environment.update({
@@ -176,6 +190,7 @@ def worker(config, run_id):
             )
             last_heartbeat = 0
             deadline = None
+            launched = time.monotonic()
             while process.poll() is None:
                 if time.monotonic() - last_heartbeat >= config["poll_seconds"]:
                     store.heartbeat(run_id, os.getuid())
@@ -197,6 +212,17 @@ def worker(config, run_id):
                 if deadline is not None and time.monotonic() > deadline:
                     print(f"gpuq {run_id}: preemption grace expired; terminating", flush=True)
                     stopping = stopping or "grace"
+                # Once a preemption notice arrives its grace period decides, so the run is requeued.
+                if not stopping and not preempting:
+                    limit = limit_reached(job, time.monotonic() - launched, monitor.idle_seconds())
+                    if limit:
+                        if limit == "timeout":
+                            detail = {"timeout_seconds": job["timeout_seconds"]}
+                        else:
+                            detail = {"idle_seconds": job["idle_seconds"], "idle_percent": job["idle_percent"]}
+                        store.record(run_id, os.getuid(), "limit_reached", {"limit": limit, **detail})
+                        print(f"gpuq {run_id}: {limit} limit reached; terminating", flush=True)
+                        stopping = limit
                 if stopping:
                     process.terminate()
                     try:
@@ -216,7 +242,7 @@ def worker(config, run_id):
         atomic_json(directory / "outcome.json", {
             "command_exit_code": exit_code, "worker_finished_at": now(),
             "cancelled": stopping is True, "pid": process.pid if process else None,
-            "preempted": bool(preempting), "attempt": job["requeues"] + 1,
+            "preempted": bool(preempting), "attempt": job["requeues"] + 1, "limit": limit,
         })
         # The slot is deliberately NOT released here: systemd kills remaining
         # service children before running the stop-post finalizer.
@@ -240,6 +266,9 @@ def finalize(config, run_id):
     exit_code = outcome.get("command_exit_code")
     if job["cancel_requested"] or outcome.get("cancelled"):
         state = "cancelled"
+    elif outcome.get("limit"):
+        # A run its own limit ended has failed, whatever exit code the terminated payload chose.
+        state, result = "failed", outcome["limit"]
     elif result == "success" and exit_code == 0:
         state = "completed"
     elif outcome.get("preempted") and job["preempt_requested"] == PREEMPT_STOP:

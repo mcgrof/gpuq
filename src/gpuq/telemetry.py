@@ -29,6 +29,10 @@ class Telemetry:
         self.previous = None
         self.error = None
         self.device = {}
+        # Idle watchdog state: when utilization last exceeded the job's idle threshold.
+        self.idle_percent = job.get("idle_percent", 5)
+        self.last_busy = self.started
+        self.utilization_seen = False
         self.directory = Path(job["run_dir"]) / "telemetry"
         self.directory.mkdir(exist_ok=True)
 
@@ -102,6 +106,11 @@ class Telemetry:
                             self.valid_counts[key] = self.valid_counts.get(key, 0) + 1
                             self.maximum[key] = max(self.maximum.get(key, value), value)
                             self.minimum[key] = min(self.minimum.get(key, value), value)
+                    utilization = stats.get("utilization")
+                    if isinstance(utilization, (float, int)):
+                        self.utilization_seen = True
+                        if utilization > self.idle_percent:
+                            self.last_busy = monotonic
                     power = stats.get("power")
                     if isinstance(power, (int, float)):
                         if self.previous:
@@ -112,6 +121,13 @@ class Telemetry:
                 file.flush()
         except Exception as error:
             self.error = str(error)
+
+    def idle_seconds(self):
+        """Seconds since utilization last exceeded the idle threshold (counting from the start of
+        collection), or None when no utilization reading is available: no reading is not idleness."""
+        if not self.utilization_seen or self.error is not None or self.thread is None or not self.thread.is_alive():
+            return None
+        return time.monotonic() - self.last_busy
 
     def stop(self):
         self.stop_event.set()

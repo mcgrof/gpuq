@@ -18,6 +18,8 @@ systemd user services. It has no network server or root experiment runner.
 - Persistent runs and events, grouped by experiment ID with unique run IDs.
 - systemd process supervision and cleanup before releasing a reservation.
 - Cancellation, remaining-time estimates, pinning, and interrupted-run recovery.
+- Opt-in [run limits](docs/limits.md): a wall-clock timeout, and an idle
+  watchdog that ends a run whose device stays unused, such as a hung job.
 - [Low-priority jobs](docs/preemption.md) that yield to normal ones: the payload
   gets a signal and a notice file, checkpoints, and is requeued to resume.
 - [Tandem reservations](docs/tandem.md) with multi-host start barriers and renewable leases.
@@ -86,7 +88,8 @@ gpuq cancel RUN_ID
 ```
 
 The expected end is an estimate. It does not impose a timeout or cancel an
-overrunning experiment. Jobs run in the submission directory, with the
+overrunning experiment; use `--timeout-minutes` or `--idle-minutes` for
+that ([run limits](docs/limits.md)). Jobs run in the submission directory, with the
 resolved executable path and resource's device-selection environment.
 Use explicit interpreter paths. Credentials stay in the submitting user's
 environment or normal credential files; gpuq does not copy another user's
